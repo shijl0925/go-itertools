@@ -1,38 +1,56 @@
 package itertools
 
 import (
+	"context"
 	"sync"
 )
 
-func Map[T any, U any](function func(T) U, slice []T) *[]U {
-	result := new([]U)
-	var wg sync.WaitGroup
+func Map[T any, U any](function func(T) U, slice []T) []U {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	outCh := make(chan U, len(slice))
-	defer close(outCh)
+	result := make([]U, 0, len(slice))
+	var wg sync.WaitGroup
+	wg.Add(len(slice))
+
+	outCh := make(chan U)
+	errorCh := make(chan error)
 
 	for _, sl := range slice {
-		wg.Add(1)
-
 		go func(i T) {
 			defer wg.Done()
-			outCh <- function(i)
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				defer func() {
+					if r := recover(); r != nil {
+						errorCh <- r.(error)
+					}
+				}()
+				out := function(i)
+				outCh <- out
+			}
 		}(sl)
 	}
 
-	wg.Wait()
-
-	wgReceiver := &sync.WaitGroup{}
+	go func() {
+		wg.Wait()
+		close(outCh)
+	}()
 
 	go func() {
-		wgReceiver.Add(1)
-		defer wgReceiver.Done()
 		for out := range outCh {
-			*result = append(*result, out)
+			result = append(result, out)
 		}
 	}()
 
-	wgReceiver.Wait()
+	wg.Wait()
+
+	// Check for errors
+	if len(errorCh) > 0 {
+		panic(<-errorCh)
+	}
 
 	return result
 }
